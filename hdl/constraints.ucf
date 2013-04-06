@@ -1,0 +1,77 @@
+################################################################################
+# SYS_CLK P89
+# UART_RX P88
+# UART_TX P90
+#
+# Wing 1 Column A
+#   W1A<0> P18
+#   W1A<1> P23
+#   W1A<2> P26
+#   W1A<3> P33
+#   W1A<4> P35
+#   W1A<5> P40
+#   W1A<6> P53
+#   W1A<7> P57
+#   W1A<8> P60
+#   W1A<9> P62
+#   W1A<10> P65
+#   W1A<11> P67
+#   W1A<12> P70
+#   W1A<13> P79
+#   W1A<14> P84
+#   W1A<15> P86
+# Wing 1 Column B
+#   W1B<0> P85
+#   W1B<1> P83
+#   W1B<2> P78
+#   W1B<3> P71
+#   W1B<4> P68
+#   W1B<5> P66
+#   W1B<6> P63
+#   W1B<7> P61
+#   W1B<8> P58
+#   W1B<9> P54
+#   W1B<10> P41
+#   W1B<11> P36
+#   W1B<12> P34
+#   W1B<13> P32
+#   W1B<14> P25
+#   W1B<15> P22
+#
+# Wing 2 Column C
+#   W2C<0> P91
+#   W2C<1> P92
+#   W2C<2> P94
+#   W2C<3> P95
+#   W2C<4> P98
+#   W2C<5> P2
+#   W2C<6> P3
+#   W2C<7> P4
+#   W2C<8> P5
+#   W2C<9> P9
+#   W2C<10> P10
+#   W2C<11> P11
+#   W2C<12> P12
+#   W2C<13> P15
+#   W2C<14> P16
+#   W2C<15> P17
+################################################################################
+
+# Drive may be 2, 4, 6, 8, 12, or 16 mA. 
+# Slew rate may be SLOW or FAST
+# Default is LVCMOS25, SLOW, 12 mA
+# 32 MHz onboard oscillator
+NET "XTAL_CLK" LOC = "P89" | IOSTANDARD = LVCMOS33;
+TIMESPEC TS_XTAL_CLK = PERIOD "XTAL_CLK" 31.25 ns HIGH 50% INPUT_JITTER 100 ps;
+NET "XTAL_CLK" TNM_NET = XTAL_CLK;
+
+# FTDI USB-RS232
+# NET "UART_RX"  LOC = "P88" | IOSTANDARD = LVCMOS33;
+# NET "UART_TX"  LOC = "P90" | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = SLOW;
+NET "UART_RX"  LOC = "P88" | IOSTANDARD = LVTTL;
+NET "UART_TX"  LOC = "P90" | IOSTANDARD = LVTTL | DRIVE = 12 | SLEW = SLOW;
+
+NET "DF_MISO"  LOC = "P44" | IOSTANDARD = LVCMOS33;
+NET "DF_MOSI"  LOC = "P27" | IOSTANDARD = LVCMOS33 | DRIVE = 8 | SLEW = FAST;
+NET "DF_CS"    LOC = "P24" | IOSTANDARD = LVCMOS33 | DRIVE = 8 | SLEW = FAST;
+NET "DF_SCK"   LOC = "P50" | IOSTANDARD = LVCMOS33 | DRIVE = 8 | SLEW = FAST;

@@ -1,0 +1,9 @@
+*~
+
+# Xilinx ISE temporary files
+*.exe
+*.cmd
+*.log
+*.ini
+*.html
+
