@@ -1,9 +1,57 @@
+# Editor temporary files
 *~
+*#
+
+# OS gunk
+.DS_Store
+Thumbs.db
+Desktop.ini
 
 # Xilinx ISE temporary files
-*.exe
-*.cmd
-*.log
-*.ini
-*.html
+# Not sure about many of these!
+
+proj/*/*.exe
+proj/*/*.cmd
+proj/*/*.cmd_log
+proj/*/*.log
+proj/*/*.ini
+proj/*/*.html
+proj/*/*.xml
+proj/*/*.csv
+
+proj/*/*_pad.txt
+proj/*/*.bld
+proj/*/*.gise
+proj/*/*.lso
+
+proj/*/_ngo/*
+proj/*/_xmsgs/*
+proj/*/iseconfig/*
+proj/*/xlnx_auto_0_xdb/*
+proj/*/xst/*
+
+proj/*/*.pad
+proj/*/*.par
+proj/*/*.pcf
+proj/*/*.prj
+proj/*/*.ptwx
+
+proj/*/*.map
+proj/*/*.mrp
+proj/*/*.ncd
+proj/*/*.ngm
+proj/*/*.ngc
+proj/*/*.ngd
+proj/*/*.ngr
+
+proj/*/*.stx
+proj/*/*.syr
+proj/*/*.twr
+proj/*/*.twx
+
+proj/*/*.unroutes
+
+proj/*/*.xpi
+proj/*/*.xst
+proj/*/*.xrpt
 
