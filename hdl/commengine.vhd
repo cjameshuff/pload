@@ -10,7 +10,6 @@ library work;
     use work.CommEngine_pkg.all;
     use work.CRC_Engine_pkg.all;
     use work.UART_pkg.all;
-    use work.DFlash_Controller_pkg.all;
 
 entity CommEngine is
     port(
@@ -20,27 +19,27 @@ entity CommEngine is
         UART_RX: in std_logic;
         UART_TX: out std_logic;
         
-        DF_MISO: in  std_logic;
-        DF_MOSI: out std_logic;
-        DF_SCK:  out std_logic;
-        DF_SS:   out std_logic
+        RAMBUF_DO:   in std_logic_vector(7 downto 0);
+        RAMBUF_DI:   out std_logic_vector(7 downto 0);
+        RAMBUF_ADDR: out std_logic_vector(15 downto 0);
+        RAMBUF_WE:   out std_logic;
+        
+        STATUS:   in std_logic_vector(31 downto 0);
+        
+        RX_PKT:       out pkt_bfr_t;
+        PKT_RECEIVED: out std_logic;
+        
+        TX_PKT:   in pkt_bfr_t;
+        SEND_PKT: in  std_logic
     );
 end CommEngine;
-
--- Command format:
--- OPCODE:8 ARGS:32 CRC:16 [PAYLOAD] CRC:16
--- Flags: unused:7 HAS_PAYLOAD:1
--- No-payload packets are of fixed size: 8 bytes.
--- Packets with a payload have 2048 additional bytes and a second CRC.
--- At present, the "CRC" is a simple checksum. A real CRC will be implemented eventually.
---
--- State machine has a 2048 byte RAM buffer and several control registers.
 
 architecture Behavioral of CommEngine is
     type comm_state_t is (
         ST_RX_CMD,
         ST_RX_ARGS,
-        ST_RX_CRC,
+        ST_RX_CRC_H,
+        ST_RX_CRC_L,
         
         ST_TX_CMD,
         ST_TX_ARGS,
@@ -49,13 +48,18 @@ architecture Behavioral of CommEngine is
         
         ST_WRITE_BUFFER,
         ST_WRITE_BUFFER2,
+        ST_WRITE_BUFFER3,
         
         ST_READ_BUFFER,
         ST_READ_BUFFER2,
         
+        ST_CRC_BUFFER,
+        ST_CRC_BUFFER2,
+        
         ST_ACK_BUFFER_CRC,
         
         ST_CHECK_CRC,
+        ST_WAIT_RESPONSE,
         ST_ERROR,
         ST_EXECUTE
     );
@@ -70,31 +74,19 @@ architecture Behavioral of CommEngine is
     signal UART_TX_BUSY:  std_logic;
     
     -- CRC engine signals
-    signal CRC_DATA:    std_logic_vector(7 downto 0);
-    signal CRC_WRITE:   std_logic;
-    signal CRC_CLEAR:   std_logic;
-    signal CRC_READY:   std_logic;
-    signal CRC_OUT:     std_logic_vector(15 downto 0);
-    
-    -- SPI flash controller signals
-    signal DF_CONTROL:  std_logic_vector(7 downto 0);
-    signal DF_ADDRESS:  std_logic_vector(23 downto 0);
-    signal DF_DATA_IN:  std_logic_vector(7 downto 0);
-    signal DF_DATA_OUT: std_logic_vector(7 downto 0);
-    signal DF_BUSY:     std_logic;
-    
-    -- RAM buffer signals
-    signal RAMBUF_DO:     std_logic_vector(7 downto 0);
-    signal RAMBUF_DI:     std_logic_vector(7 downto 0);
-    signal RAMBUF_ADDR:   std_logic_vector(10 downto 0);
-    signal RAMBUF_WE:     std_logic := '0';
+    signal CRC_DATA:   std_logic_vector(7 downto 0);
+    signal CRC_WRITE:  std_logic;
+    signal CRC_CLEAR:  std_logic;
+    signal CRC_READY:  std_logic;
+    signal CRC_OUT:    std_logic_vector(15 downto 0);
     
     -- Message/command state
-    signal OP_CMD:        std_logic_vector(7 downto 0);
-    signal OP_ARGS:       std_logic_vector(31 downto 0);
     signal RECEIVED_CRC:  std_logic_vector(15 downto 0);
     
-    signal BYTE_COUNTER:  unsigned(11 downto 0);
+    signal PKT_BFR:  pkt_bfr_t;
+    
+    signal BUF_CTR:  std_logic_vector(15 downto 0);
+    signal PKT_BYTE_CTR:  integer range 0 to 4;
     
 begin
     UART_0: UART
@@ -116,26 +108,6 @@ begin
             TX_OUT   => UART_TX
         );
     
-    DFlash_Controller_0: DFlash_Controller
-        generic map(
-            CLOCK_FREQ => 64000000, -- Hz
-    --         BAUD_RATE:     integer; -- Hz
-            STARTUP_DELAY => 100 -- microseconds
-        )
-        port map(
-            RESET    => RESET,
-            SYS_CLK  => SYS_CLK,
-            CONTROL  => DF_CONTROL,
-            ADDRESS  => DF_ADDRESS,
-            DATA_IN  => DF_DATA_IN,
-            DATA_OUT => DF_DATA_OUT,
-            BUSY     => DF_BUSY,
-            MISO     => DF_MISO,
-            MOSI     => DF_MOSI,
-            SCK      => DF_SCK,
-            SS       => DF_SS
-        );
-    
     CRC_Engine_0: CRC_Engine
         port map(
             RESET   => RESET,
@@ -147,80 +119,76 @@ begin
             READY   => CRC_READY -- ignored in most states...byte rate is far lower than max CRC calculation rate.
         );
     
-    rxtx_buffer: RAMB16_S9
-        generic map(
-            INIT => "0",
-            SRVAL => X"0",
-            WRITE_MODE => "WRITE_FIRST"
-        )
-        port map(
-            DO   => RAMBUF_DO,
-            DOP  => open,
-            ADDR => RAMBUF_ADDR,
-            CLK  => SYS_CLK,
-            DI   => RAMBUF_DI,
-            DIP  => "1",
-            EN   => '1',
-            SSR  => '0',
-            WE   => RAMBUF_WE
-        );
-    
-    RAMBUF_ADDR <= std_logic_vector(BYTE_COUNTER(10 downto 0));
+    RAMBUF_ADDR <= BUF_CTR;
     
     MainProc: process(RESET, SYS_CLK) is
     begin
         if(RESET = '1') then
             COMM_STATE <= ST_RX_CMD;
+            BUF_CTR <= X"0000";
+            PKT_BYTE_CTR <= 0;
+            
         elsif(rising_edge(SYS_CLK)) then
             RAMBUF_WE <= '0';
             UART_XMIT <= '0';
             CRC_CLEAR <= '0';
             CRC_WRITE <= '0';
+            PKT_RECEIVED <= '0';
             
             case COMM_STATE is
                 -- ================================================================
-                -- Entry/idle state: listen/start receiving commands
+                -- Entry point/idle state: ST_RX_CMD
+                -- Listen and start receiving commands.
                 -- ================================================================
                 when ST_RX_CMD =>
                     if(UART_RX_VALID = '1' and UART_RX_BYTE /= X"00") then
-                        OP_CMD <= UART_RX_BYTE;
+                        PKT_BFR(0) <= UART_RX_BYTE;
+                        
                         CRC_DATA <= UART_RX_BYTE;
                         CRC_WRITE <= '1';
-                        BYTE_COUNTER <= to_unsigned(0, 12);
+                        
+                        PKT_BYTE_CTR <= 1;
                         COMM_STATE <= ST_RX_ARGS;
                     end if;
                 -- end state ST_RX_CMD
                 
                 when ST_RX_ARGS =>
                     if(UART_RX_VALID = '1') then
-                        OP_ARGS <= OP_ARGS(23 downto 0) & UART_RX_BYTE;
+                        PKT_BFR(PKT_BYTE_CTR) <= UART_RX_BYTE;
+                        PKT_BYTE_CTR <= PKT_BYTE_CTR + 1;
+                        
                         CRC_DATA <= UART_RX_BYTE;
                         CRC_WRITE <= '1';
-                        BYTE_COUNTER <= BYTE_COUNTER + 1;
-                        if(BYTE_COUNTER = 3) then
-                            BYTE_COUNTER <= to_unsigned(0, 12);
-                            COMM_STATE <= ST_RX_CRC;
+                        
+                        if(PKT_BYTE_CTR = 4) then
+                            PKT_BYTE_CTR <= 0;
+                            COMM_STATE <= ST_RX_CRC_H;
                         end if;
                     end if;
                 -- end state ST_RX_ARGS
                 
-                when ST_RX_CRC =>
+                when ST_RX_CRC_H =>
                     if(UART_RX_VALID = '1') then
-                        RECEIVED_CRC <= RECEIVED_CRC(7 downto 0) & UART_RX_BYTE;
-                        BYTE_COUNTER <= BYTE_COUNTER + 1;
-                        if(BYTE_COUNTER = 1) then
-                            BYTE_COUNTER <= to_unsigned(0, 12);
-                            COMM_STATE <= ST_CHECK_CRC;
-                        end if;
+                        RECEIVED_CRC(15 downto 8) <= UART_RX_BYTE;
+                        COMM_STATE <= ST_RX_CRC_L;
                     end if;
-                -- end state ST_RX_CRC
+                -- end state ST_RX_CRC_H
+                
+                when ST_RX_CRC_L =>
+                    if(UART_RX_VALID = '1') then
+                        RECEIVED_CRC(7 downto 0) <= UART_RX_BYTE;
+                        COMM_STATE <= ST_CHECK_CRC;
+                    end if;
+                -- end state ST_RX_CRC_L
                 
                 -- CRC computation and package reception complete, check computed against received value
                 when ST_CHECK_CRC =>
-                    if(RECEIVED_CRC = CRC_OUT) then
-                        COMM_STATE <= ST_EXECUTE;
-                    else
-                        COMM_STATE <= ST_ERROR;
+                    if(CRC_READY = '1') then
+                        if(RECEIVED_CRC = CRC_OUT) then
+                            COMM_STATE <= ST_EXECUTE;
+                        else
+                            COMM_STATE <= ST_ERROR;
+                        end if;
                     end if;
                 -- end state ST_CHECK_CRC
                 
@@ -231,8 +199,10 @@ begin
                 -- ================================================================
                 when ST_ACK_BUFFER_CRC =>
                     if(CRC_WRITE = '0' and CRC_READY = '1') then
-                        OP_ARGS(31 downto 16) <= X"0000";
-                        OP_ARGS(15 downto 0) <= CRC_OUT;
+                        PKT_BFR(1) <= X"00";
+                        PKT_BFR(2) <= X"00";
+                        PKT_BFR(3) <= CRC_OUT(15 downto 8);
+                        PKT_BFR(4) <= CRC_OUT(7 downto 0);
                         CRC_CLEAR <= '1';
                         COMM_STATE <= ST_TX_CMD;
                     end if;
@@ -240,7 +210,8 @@ begin
                 
                 
                 -- ================================================================
-                -- Entry: receive buffer, ack with CRC of received data
+                -- Entry point: ST_WRITE_BUFFER
+                -- Receive buffer, ack with CRC of received data.
                 -- Returns to ST_RX_CMD via ST_ACK_BUFFER_CRC
                 -- ================================================================
                 when ST_WRITE_BUFFER =>
@@ -251,33 +222,40 @@ begin
                     if(UART_RX_VALID = '1') then
                         RAMBUF_DI <= UART_RX_BYTE;
                         RAMBUF_WE <= '1';
+                        
                         CRC_DATA <= UART_RX_BYTE;
                         CRC_WRITE <= '1';
-                    end if;
-                    
-                    if(RAMBUF_WE = '1') then
-                        BYTE_COUNTER <= BYTE_COUNTER + 1;
-                        if(BYTE_COUNTER = unsigned(OP_ARGS(11 downto 0))) then
-                            BYTE_COUNTER <= to_unsigned(0, 12);
-                            COMM_STATE <= ST_ACK_BUFFER_CRC;
-                        end if;
+                        
+                        COMM_STATE <= ST_WRITE_BUFFER3;
                     end if;
                 -- end state ST_WRITE_BUFFER2
+                    
+                when ST_WRITE_BUFFER3 =>
+                    BUF_CTR <= std_logic_vector(unsigned(BUF_CTR) + 1);
+                    if(BUF_CTR = PKT_BFR(3) & PKT_BFR(4)) then
+                        BUF_CTR <= X"0000";
+                        COMM_STATE <= ST_ACK_BUFFER_CRC;
+                    else
+                        COMM_STATE <= ST_WRITE_BUFFER2;
+                    end if;
+                -- end state ST_WRITE_BUFFER3
+                
                 
                 
                 -- ================================================================
-                -- Entry: Transmit command/response
+                -- Entry point: ST_TX_CMD
+                -- Transmit command/response
                 -- Returns to ST_RX_CMD
                 -- ================================================================
                 when ST_TX_CMD =>
                     if(UART_TX_BUSY = '0') then
-                        UART_TX_BYTE <= OP_CMD;
+                        UART_TX_BYTE <= PKT_BFR(0);
                         UART_XMIT <= '1';
                         
-                        CRC_DATA <= OP_CMD;
+                        CRC_DATA <= PKT_BFR(0);
                         CRC_WRITE <= '1';
                         
-                        BYTE_COUNTER <= to_unsigned(0, 12);
+                        PKT_BYTE_CTR <= 1;
                         COMM_STATE <= ST_TX_ARGS;
                     end if;
                 -- end state ST_TX_CMD
@@ -285,27 +263,27 @@ begin
                 when ST_TX_ARGS =>
                     -- FIXME: the UART BUSY signal may need work
                     if(UART_TX_BUSY = '0' and UART_XMIT = '0') then
-                        UART_TX_BYTE <= OP_ARGS(31 downto 24);
+                        UART_TX_BYTE <= PKT_BFR(PKT_BYTE_CTR);
                         UART_XMIT <= '1';
                         
-                        CRC_DATA <= OP_ARGS(31 downto 24);
+                        CRC_DATA <= PKT_BFR(PKT_BYTE_CTR);
                         CRC_WRITE <= '1';
                         
-                        OP_ARGS <= OP_ARGS(23 downto 0) & X"00";
-                        BYTE_COUNTER <= BYTE_COUNTER + 1;
-                        
-                        if(BYTE_COUNTER = 3) then
-                            BYTE_COUNTER <= to_unsigned(0, 12);
+                        PKT_BYTE_CTR <= PKT_BYTE_CTR + 1;
+                        if(PKT_BYTE_CTR = 4) then
+                            PKT_BYTE_CTR <= 0;
                             COMM_STATE <= ST_TX_CRC_H;
                         end if;
                     end if;
                 -- end state ST_TX_ARGS
                 
                 when ST_TX_CRC_H =>
-                    if(UART_TX_BUSY = '0' and UART_XMIT = '0') then
-                        UART_TX_BYTE <= CRC_OUT(15 downto 8);
-                        UART_XMIT <= '1';
-                        COMM_STATE <= ST_TX_CRC_L;
+                    if(CRC_READY = '1') then
+                        if(UART_TX_BUSY = '0' and UART_XMIT = '0') then
+                            UART_TX_BYTE <= CRC_OUT(15 downto 8);
+                            UART_XMIT <= '1';
+                            COMM_STATE <= ST_TX_CRC_L;
+                        end if;
                     end if;
                 -- end state ST_TX_CRC_H
                 
@@ -320,7 +298,8 @@ begin
                 
                 
                 -- ================================================================
-                -- Entry: Transmit buffer + CRC
+                -- Entry point: ST_READ_BUFFER
+                -- Transmit range of buffer followed by CRC ack packet.
                 -- Returns to ST_RX_CMD via ST_ACK_BUFFER_CRC
                 -- ================================================================
                 when ST_READ_BUFFER =>
@@ -335,15 +314,57 @@ begin
                         CRC_DATA <= RAMBUF_DO;
                         CRC_WRITE <= '1';
                         
-                        BYTE_COUNTER <= BYTE_COUNTER + 1;
-                        if(BYTE_COUNTER = unsigned(OP_ARGS(11 downto 0))) then
-                            BYTE_COUNTER <= to_unsigned(0, 12);
+                        BUF_CTR <= std_logic_vector(unsigned(BUF_CTR) + 1);
+                        if(BUF_CTR = PKT_BFR(3) & PKT_BFR(4)) then
+                            BUF_CTR <= X"0000";
                             COMM_STATE <= ST_ACK_BUFFER_CRC;
                         end if;
                     end if;
                 -- end state ST_READ_BUFFER2
                 
                 
+                -- ================================================================
+                -- Entry point: ST_CRC_BUFFER
+                -- Similar to ST_READ_BUFFER, but only transmit CRC of buffer range.
+                -- Returns to ST_RX_CMD via ST_ACK_BUFFER_CRC
+                -- ================================================================
+                when ST_CRC_BUFFER =>
+                    COMM_STATE <= ST_CRC_BUFFER2;-- need a delay for SRAM
+                -- end state ST_READ_BUFFER
+                
+                when ST_CRC_BUFFER2 =>
+                    if(CRC_WRITE = '0' and CRC_READY = '1') then
+                        CRC_DATA <= RAMBUF_DO;
+                        CRC_WRITE <= '1';
+                        
+                        BUF_CTR <= std_logic_vector(unsigned(BUF_CTR) + 1);
+                        if(BUF_CTR = PKT_BFR(3) & PKT_BFR(4)) then
+                            BUF_CTR <= X"0000";
+                            COMM_STATE <= ST_ACK_BUFFER_CRC;
+                        end if;
+                    end if;
+                -- end state ST_CRC_BUFFER2
+                
+                
+                -- ================================================================
+                -- Entry point: ST_WAIT_RESPONSE
+                -- Wait for external module to compose a response packet.
+                -- If 
+                -- ================================================================
+                when ST_WAIT_RESPONSE =>
+                    if(UART_RX_VALID = '1') then
+                        COMM_STATE <= ST_RX_CMD;-- State machine reset
+                    elsif(SEND_PKT = '1') then
+                        if(TX_PKT(0) = X"FF") then
+                            -- NACK
+                            COMM_STATE <= ST_ERROR;
+                        else
+                            -- Normal response
+                            PKT_BFR <= TX_PKT;
+                            COMM_STATE <= ST_TX_CMD;
+                        end if;
+                    end if;
+                -- end state ST_WAIT_RESPONSE
                 
                 -- ================================================================
                 -- Send NACK, go back to ST_RX_CMD
@@ -363,7 +384,7 @@ begin
                 -- ================================================================
                 when ST_EXECUTE =>
                     CRC_CLEAR <= '1';
-                    case OP_CMD is
+                    case PKT_BFR(0) is
                         when OpCode_Sync =>
                             COMM_STATE <= ST_TX_CMD;
                         -- end OpCode_Sync
@@ -373,46 +394,43 @@ begin
                         -- end OpCode_Ack
                         
                         
-                        when OpCode_SetAddress =>
-                            -- WORKING_ADDR <= OP_ARGS;
-                            COMM_STATE <= ST_RX_CMD;
-                        -- end OpCode_SetAddress
+                        when OpCode_PollStatus =>
+                            PKT_BFR(1) <= STATUS(31 downto 24);
+                            PKT_BFR(2) <= STATUS(23 downto 16);
+                            PKT_BFR(3) <= STATUS(15 downto 8);
+                            PKT_BFR(4) <= STATUS(7 downto 0);
+                            COMM_STATE <= ST_TX_CMD;
+                        -- end OpCode_Ack
+                        
+                        when OpCode_Version => -- send ack after buffer or sync
+                            PKT_BFR(1) <= CommEngine_ProtocolVersion(31 downto 24);
+                            PKT_BFR(2) <= CommEngine_ProtocolVersion(23 downto 16);
+                            PKT_BFR(3) <= CommEngine_ProtocolVersion(15 downto 8);
+                            PKT_BFR(4) <= CommEngine_ProtocolVersion(7 downto 0);
+                            COMM_STATE <= ST_TX_CMD;
+                        -- end OpCode_Ack
                         
                         
                         when OpCode_ReadBuffer =>
-                            BYTE_COUNTER <= unsigned(OP_ARGS(27 downto 16));
+                            BUF_CTR <= PKT_BFR(1) & PKT_BFR(2);
                             COMM_STATE <= ST_READ_BUFFER;
                         -- end OpCode_WriteBuffer
                         
                         when OpCode_WriteBuffer =>
-                            BYTE_COUNTER <= unsigned(OP_ARGS(27 downto 16));
+                            BUF_CTR <= PKT_BFR(1) & PKT_BFR(2);
                             COMM_STATE <= ST_WRITE_BUFFER;
                         -- end OpCode_WriteBuffer
                         
                         when OpCode_CRC_Buffer =>
-                            BYTE_COUNTER <= unsigned(OP_ARGS(27 downto 16));
---                             COMM_STATE <= ST_WRITE_BUFFER;
+                            BUF_CTR <= PKT_BFR(1) & PKT_BFR(2);
+                            COMM_STATE <= ST_CRC_BUFFER;
                         -- end OpCode_CRC_Buffer
                         
                         
-                        when OpCode_DFlash_Cmd =>
-                            BYTE_COUNTER <= unsigned(OP_ARGS(27 downto 16));
---                             COMM_STATE <= ST_WRITE_BUFFER;
-                        -- end OpCode_DFlash_Cmd
-                        
-                        when OpCode_DFlash_WriteData =>
-                            BYTE_COUNTER <= unsigned(OP_ARGS(27 downto 16));
---                             COMM_STATE <= ST_WRITE_BUFFER;
-                        -- end OpCode_DFlash_WriteData
-                        
-                        when OpCode_DFlash_ReadData =>
-                            BYTE_COUNTER <= unsigned(OP_ARGS(27 downto 16));
---                             COMM_STATE <= ST_WRITE_BUFFER;
-                        -- end OpCode_DFlash_ReadData
-                        
-                        
                         when others => -- send ack
-                            COMM_STATE <= ST_ERROR;
+                            RX_PKT <= PKT_BFR;
+                            PKT_RECEIVED <= '1';
+                            COMM_STATE <= ST_WAIT_RESPONSE;
                         -- end OpCode_Ack
                     end case; -- OP_CMD
                 -- end state ST_EXECUTE

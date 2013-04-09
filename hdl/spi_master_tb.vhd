@@ -16,7 +16,6 @@ architecture Behavioral of SPI_Master_TB is
     signal RESET:   std_logic := '0';
     signal SYS_CLK: std_logic := '0';
     
-    signal RX_VALID: std_logic := '0';
     signal RX_BYTE:  std_logic_vector(7 downto 0);
     signal TX_BYTE:  std_logic_vector(7 downto 0);
     signal XMIT:     std_logic := '0';
@@ -41,7 +40,6 @@ begin
             TX_BYTE => TX_BYTE,
             XMIT => XMIT,
             BUSY => BUSY,
-            RX_VALID => RX_VALID,
             
             MISO => MISO,
             MOSI => MOSI,

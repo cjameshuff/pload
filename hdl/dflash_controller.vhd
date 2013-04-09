@@ -59,17 +59,16 @@ library work;
 
 entity DFlash_Controller is
     generic(
-        CLOCK_FREQ:    integer; -- Hz
+        CLOCK_FREQ:    real; -- Hz
 --         BAUD_RATE:     integer; -- Hz
-        STARTUP_DELAY: integer  -- microseconds
+        STARTUP_DELAY: real  -- microseconds
     );
     port(
         RESET:   in std_logic;-- asynchronous reset
         SYS_CLK: in std_logic;
         
-        CONTROL:    in  std_logic_vector(7 downto 0);
-        
-        ADDRESS:    in std_logic_vector(23 downto 0);
+        CONTROL:    in  std_logic_vector(3 downto 0);
+        ADDRESS:    in  std_logic_vector(23 downto 0);
         DATA_IN:    in  std_logic_vector(7 downto 0);
         DATA_OUT:   out std_logic_vector(7 downto 0);
         BUSY:       out std_logic;
@@ -133,13 +132,12 @@ architecture Behavioral of DFlash_Controller is
     
     signal DF_STATE:        df_state_t := ST_STARTUP;
     signal DF_RETURN_STATE: df_state_t := ST_STARTUP;
-    signal DF_RWMODE:        df_mode_t := MODE_READING;
+    signal DF_RWMODE:       df_mode_t := MODE_READING;
     
-    signal SPI_RX_VALID: std_logic := '0';
     signal SPI_RX_BYTE:  std_logic_vector(7 downto 0);
     signal SPI_TX_BYTE:  std_logic_vector(7 downto 0);
     signal SPI_XMIT:     std_logic := '0';
-    signal SPI_BUSY:  std_logic := '0';
+    signal SPI_BUSY:     std_logic := '0';
     
     signal ADDRESS_REG: std_logic_vector(23 downto 0);
     signal DATA_REG:    std_logic_vector(15 downto 0);
@@ -155,20 +153,20 @@ architecture Behavioral of DFlash_Controller is
     signal FIRST_WRITE: std_logic := '0';-- first write after write mode entered
     signal SECOND_BYTE: std_logic := '0';-- is write of second byte
     
-    signal DELAY_CTR: integer range 0 to ((CLOCK_FREQ*STARTUP_DELAY)/1000000);
+    constant DELAY_CTR_MAX: integer := integer((CLOCK_FREQ*STARTUP_DELAY)/1000000.0);
+    signal DELAY_CTR: integer range 0 to DELAY_CTR_MAX;
     
 begin
     SPI_Master_0: SPI_Master
         generic map(
             BAUD_DIV => 4,
-            CPOL => '1',
+            CPOL => '0',
             CPHA => '0'
         )
         port map(
             RESET => RESET,
             SYS_CLK => SYS_CLK,
             
-            RX_VALID => SPI_RX_VALID,
             RX_BYTE  => SPI_RX_BYTE,
             TX_BYTE  => SPI_TX_BYTE,
             XMIT     => SPI_XMIT,
@@ -183,10 +181,23 @@ begin
     begin
         if(RESET = '1') then
             DF_STATE <= ST_STARTUP;
-            SS <= '1';
+            DF_RETURN_STATE <= ST_STARTUP;
+            DELAY_CTR <= DELAY_CTR_MAX;
+            
             ADDRESS_REG <= X"000000";
-            DELAY_CTR <= ((CLOCK_FREQ*STARTUP_DELAY)/1000000);
+            DATA_REG <= X"0000";
+            
+            CMD_BFR <= (others => (others => '0'));
+            CMD_CTR <= 0;
             CMD_LEAVE_ACTIVE <= '0';
+            
+            FIRST_WRITE <= '1';
+            SECOND_BYTE <= '0';
+            
+            SS <= '1';
+            SPI_XMIT <= '0';
+            
+            BUSY <= '1';
             
         elsif(rising_edge(SYS_CLK)) then
             SPI_XMIT <= '0';
@@ -245,6 +256,7 @@ begin
                 -- Send DF_WRSR 0x00
                 -- Send DF_WREN command
                 when ST_START_WRITE =>
+                    DF_RWMODE <= MODE_WRITING;
                     FIRST_WRITE <= '1';
                     SECOND_BYTE <= '0';
                     DF_STATE <= ST_START_WRITE_ERSR;
@@ -402,6 +414,8 @@ begin
                 
                 when ST_READ_BYTE =>
                     if(SPI_BUSY = '0' and SPI_XMIT = '0') then
+--                         DATA_OUT <= ADDRESS_REG(7 downto 0);
+--                         ADDRESS_REG <= std_logic_vector(unsigned(ADDRESS_REG) + 1);
                         DATA_OUT <= SPI_RX_BYTE;
                         DF_STATE <= ST_IDLE;
                     end if;
@@ -414,8 +428,8 @@ begin
                         BUSY <= '0';
                     end if;
                     
-                    -- Need to terminate continuous read
-                    if(DF_RWMODE = MODE_READING and CONTROL /= DFCTL_RW_NEXT) then
+                    -- Need to terminate continuous read if command received that's not a read
+                    if(DF_RWMODE = MODE_READING and CONTROL /= DFCTL_RW_NEXT and CONTROL /= DFCTL_NOP) then
                         CMD_LEAVE_ACTIVE <= '0';
                         SS <= '1';
                     end if;
@@ -448,8 +462,8 @@ begin
                                 else
                                     -- save second byte and program word
                                     DATA_REG(7 downto 0) <= DATA_IN;
-                                    DF_STATE <= ST_AAI_PROG;
                                     SECOND_BYTE <= '0';
+                                    DF_STATE <= ST_AAI_PROG;
                                 end if;
                             end if;
                         -- end DFCTL_RW_NEXT

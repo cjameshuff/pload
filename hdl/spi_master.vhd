@@ -22,9 +22,7 @@ entity SPI_Master is
         RESET:    in std_logic;-- asynchronous reset
         SYS_CLK:  in std_logic;
         
-        RX_VALID: out std_logic;
         RX_BYTE:  out std_logic_vector(7 downto 0);
-        
         TX_BYTE:  in std_logic_vector(7 downto 0);
         XMIT:     in std_logic;
         BUSY:     out std_logic;
@@ -49,7 +47,6 @@ begin
             
         elsif(rising_edge(SYS_CLK)) then
             BUSY <= '0';
-            RX_VALID <= '0';
             
             if(BIT_CTR = 0) then
                 if(XMIT = '1') then
@@ -73,7 +70,6 @@ begin
                     end if;
                 else
                     RX_BYTE <= RXTX_BUF;
-                    RX_VALID <= '1';
                 end if;
             else
                 BUSY <= '1';
